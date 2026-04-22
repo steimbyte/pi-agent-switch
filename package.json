@@ -1,0 +1,11 @@
+{
+  "name": "pi-agent-switch",
+  "version": "1.0.0",
+  "description": "Switch the current session to use a specific agent - OpenCode-style primary agent switching",
+  "main": "index.ts",
+  "pi": {
+    "extension": {
+      "dev": false
+    }
+  }
+}
