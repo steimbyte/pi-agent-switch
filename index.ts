@@ -11,7 +11,7 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, Input } from "@mariozechner/pi-tui";
+import { Container, type SelectItem, SelectList, Text, Input, matchesKey, Key } from "@mariozechner/pi-tui";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents";
 
@@ -22,30 +22,6 @@ let activeAgentName: string | null = null;
 let activeAgentConfig: ReturnType<typeof findAgent> | null = null;
 
 export default function (pi: ExtensionAPI) {
-	// ── Fuzzy filter ────────────────────────────────────────────────────────
-
-	function fuzzyMatch(query: string, text: string): boolean {
-		if (!query) return true;
-		const q = query.toLowerCase();
-		const t = text.toLowerCase();
-		// Simple substring + character-by-character fuzzy
-		if (t.includes(q)) return true;
-		let qi = 0;
-		for (let i = 0; i < t.length && qi < q.length; i++) {
-			if (t[i] === q[qi]) qi++;
-		}
-		return qi === q.length;
-	}
-
-	function filterAgents(agents: ReturnType<typeof discoverAgents>, query: string): typeof agents {
-		if (!query) return agents;
-		return agents.filter(
-			(a) =>
-				fuzzyMatch(query, a.name) ||
-				fuzzyMatch(query, a.description),
-		);
-	}
-
 	// ── Helper: build agent picker UI with search ───────────────────────────
 
 	async function showPicker(
@@ -57,17 +33,14 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		let searchQuery = "";
-		let filtered = allAgents;
-		let selectedIndex = 0;
-
-		const rebuildItems = (): SelectItem[] =>
-			filtered.map((a) => {
+		// Build items for SelectList
+		const buildItems = (): SelectItem[] =>
+			allAgents.map((a) => {
 				const isActive = a.name === activeAgentName;
 				const activeBadge = isActive ? " ✓" : "";
 				// Show folder path in label if agent is in subfolder
-				const displayName = a.relativePath 
-					? `${a.relativePath}/${a.name}` 
+				const displayName = a.relativePath
+					? `${a.relativePath}/${a.name}`
 					: a.name;
 				return {
 					value: a.name,
@@ -75,6 +48,8 @@ export default function (pi: ExtensionAPI) {
 					description: `${a.source === "project" ? "📁" : "🏠"} ${a.description}${isActive ? " ◀ active" : ""}`,
 				};
 			});
+
+		const items = buildItems();
 
 		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 			const container = new Container();
@@ -96,14 +71,21 @@ export default function (pi: ExtensionAPI) {
 			// Divider
 			container.addChild(new Text(theme.fg("dim", "  ─────────────────────────  "), 1, 0));
 
-			// Agent list
-			const selectList = new SelectList(rebuildItems(), Math.min(filtered.length, MAX_AGENTS_SHOWN), {
+			// Agent list with built-in filtering
+			const selectList = new SelectList(items, MAX_AGENTS_SHOWN, {
 				selectedPrefix: (t) => theme.fg("accent", t),
 				selectedText: (t) => theme.fg("accent", t),
 				description: (t) => theme.fg("muted", t),
 				scrollInfo: (t) => theme.fg("dim", t),
 				noMatch: (t) => theme.fg("warning", t),
 			});
+
+			// Handle selection
+			selectList.onSelect = (item) => {
+				done(undefined);
+				activate(pi, ctx, item.value as string);
+			};
+			selectList.onCancel = () => done(undefined);
 
 			container.addChild(selectList);
 
@@ -113,7 +95,8 @@ export default function (pi: ExtensionAPI) {
 				1,
 				0,
 			);
-			noResults.visible = () => filtered.length === 0;
+			// Show when filter is active but no matches
+			noResults.visible = () => searchInput.value.length > 0 && selectList.getSelectedItem() === null;
 			container.addChild(noResults);
 
 			// Bottom
@@ -124,72 +107,37 @@ export default function (pi: ExtensionAPI) {
 				render: (w: number) => container.render(w),
 				invalidate: () => container.invalidate(),
 				handleInput: (data: string) => {
-					// Printable characters → type in search
-					if (data.length === 1 && data.charCodeAt(0) >= 32) {
-						searchInput.handleInput(data);
-						searchQuery = searchInput.value;
-						filtered = filterAgents(allAgents, searchQuery);
-						selectedIndex = 0;
-						selectList.selectedIndex = 0;
-						tui.requestRender();
-						return;
-					}
-					// Backspace → delete character
-					if (data === "backspace") {
-						searchInput.handleInput(data);
-						searchQuery = searchInput.value;
-						filtered = filterAgents(allAgents, searchQuery);
-						selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1));
-						selectList.selectedIndex = selectedIndex;
-						tui.requestRender();
-						return;
-					}
-					// Arrow up → move list up
-					if (data === "up") {
-						selectedIndex = Math.max(0, selectedIndex - 1);
-						selectList.selectedIndex = selectedIndex;
-						tui.requestRender();
-						return;
-					}
-					// Arrow down → move list down
-					if (data === "down") {
-						selectedIndex = Math.min(filtered.length - 1, selectedIndex + 1);
-						selectList.selectedIndex = selectedIndex;
-						tui.requestRender();
-						return;
-					}
-					// Enter → select agent
-					if (data === "enter") {
-						const item = selectList.selectedItem();
-						if (item) {
-							done(undefined);
-							activate(pi, ctx, item.value as string);
-						}
-						return;
-					}
-					// Escape → cancel
-					if (data === "escape") {
+					// Escape → cancel (check first)
+					if (matchesKey(data, Key.escape)) {
 						done(undefined);
 						return;
 					}
-					// Tab → move list down
-					if (data === "tab" || data === "shift+tab") {
-						const dir = data === "tab" ? 1 : -1;
-						selectedIndex = Math.max(0, Math.min(filtered.length - 1, selectedIndex + dir));
-						selectList.selectedIndex = selectedIndex;
+
+					// Forward printable chars and backspace to both Input and SelectList
+					if (data.length === 1 && data.charCodeAt(0) >= 32) {
+						searchInput.handleInput(data);
+						selectList.setFilter(searchInput.value);
 						tui.requestRender();
 						return;
 					}
-					// Home/End → jump to first/last
-					if (data === "home") {
-						selectedIndex = 0;
-						selectList.selectedIndex = 0;
+					if (matchesKey(data, Key.backspace)) {
+						searchInput.handleInput(data);
+						selectList.setFilter(searchInput.value);
 						tui.requestRender();
 						return;
 					}
-					if (data === "end") {
-						selectedIndex = Math.max(0, filtered.length - 1);
-						selectList.selectedIndex = selectedIndex;
+
+					// Forward navigation/selection keys to SelectList
+					if (
+						matchesKey(data, Key.up) ||
+						matchesKey(data, Key.down) ||
+						matchesKey(data, Key.enter) ||
+						matchesKey(data, Key.tab) ||
+						matchesKey(data, Key.shift("tab")) ||
+						matchesKey(data, Key.home) ||
+						matchesKey(data, Key.end)
+					) {
+						selectList.handleInput(data);
 						tui.requestRender();
 						return;
 					}
