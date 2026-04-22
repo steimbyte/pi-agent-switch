@@ -3,17 +3,11 @@
  * 
  * Allows switching the current session to use a specific agent's system prompt.
  * Similar to OpenCode's Tab key agent switching, but via /agent command.
- * 
- * Usage:
- *   /agent          - Open agent selector
- *   /agent <name>   - Switch directly to agent by name
- *   /agent-off      - Disable agent switching, restore default behavior
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 interface AgentInfo {
@@ -21,6 +15,8 @@ interface AgentInfo {
   description: string;
   systemPrompt: string;
   systemPromptMode: "append" | "replace";
+  inheritProjectContext: boolean;
+  inheritSkills: boolean;
   filePath: string;
 }
 
@@ -28,7 +24,101 @@ interface AgentInfo {
 let activeAgent: AgentInfo | null = null;
 let currentCtx: ExtensionContext | undefined;
 
-// Agent discovery - simplified version
+/**
+ * Parse YAML frontmatter handling multiline strings (>-, |-, >, |)
+ */
+function parseFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
+  const frontmatter: Record<string, unknown> = {};
+  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  
+  if (!normalized.startsWith("---")) {
+    return { frontmatter, body: normalized };
+  }
+  
+  const endIndex = normalized.indexOf("\n---", 3);
+  if (endIndex === -1) {
+    return { frontmatter, body: normalized };
+  }
+  
+  const frontmatterBlock = normalized.slice(4, endIndex);
+  const body = normalized.slice(endIndex + 4).trim();
+  
+  // Parse line by line, handling multiline strings
+  const lines = frontmatterBlock.split("\n");
+  let i = 0;
+  
+  while (i < lines.length) {
+    const line = lines[i];
+    const match = line.match(/^([\w-]+):\s*(.*)$/);
+    
+    if (match) {
+      const key = match[1];
+      let value = match[2];
+      
+      // Check for multiline indicator
+      if (/^[>|\-?]\s*$/.test(value)) {
+        // Multiline string follows
+        const indicator = value.trim(); // >, |, >-, |-, etc.
+        const fold = indicator.includes("-") ? false : (indicator === "|" ? false : true); // > folds, | preserves
+        const consumeIndent = indicator.includes("-") || indicator === ">" || indicator === "|";
+        
+        let multilineValue = "";
+        i++;
+        
+        while (i < lines.length) {
+          const contentLine = lines[i];
+          
+          // Check if we've hit a non-indented line (end of this field)
+          if (contentLine.trim() === "") {
+            multilineValue += "\n";
+            i++;
+            continue;
+          }
+          
+          // Check for indented content (continuation) or unindented new key
+          const isIndented = contentLine.startsWith(" ") || contentLine.startsWith("\t");
+          const isNewKey = !isIndented && contentLine.match(/^[\w-]+:/);
+          
+          if (isNewKey && !multilineValue.endsWith("\n")) {
+            // New key found, end of multiline
+            break;
+          }
+          
+          if (isIndented || (!isNewKey && contentLine.trim())) {
+            // Continuation line
+            const text = contentLine.replace(/^\s+/, ""); // Remove leading whitespace
+            multilineValue += (fold && multilineValue ? " " : "") + text + "\n";
+            i++;
+          } else {
+            break;
+          }
+        }
+        
+        // Remove trailing newline and apply folding for >
+        if (fold) {
+          value = multilineValue.replace(/\n$/, "").replace(/\n/g, " ");
+        } else {
+          value = multilineValue.replace(/\n$/, "");
+        }
+      } else {
+        // Single line value
+        // Remove quotes
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1);
+        }
+        i++;
+      }
+      
+      frontmatter[key] = value;
+    } else {
+      i++;
+    }
+  }
+  
+  return { frontmatter, body };
+}
+
+// Agent discovery
 function discoverAgents(cwd: string): AgentInfo[] {
   const agents: AgentInfo[] = [];
   
@@ -59,11 +149,11 @@ function discoverAgents(cwd: string): AgentInfo[] {
             agents.push(agent);
           }
         } catch (e) {
-          // Skip invalid files
+          console.error(`Error parsing agent file ${filePath}:`, e);
         }
       }
     } catch (e) {
-      // Skip inaccessible directories
+      console.error(`Error reading agent directory ${dir}:`, e);
     }
   }
   
@@ -74,37 +164,26 @@ function discoverAgents(cwd: string): AgentInfo[] {
 }
 
 function parseAgentFile(content: string, filePath: string): AgentInfo | null {
-  // Parse frontmatter
-  const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n/);
-  if (!frontmatterMatch) return null;
+  const { frontmatter, body } = parseFrontmatter(content);
   
-  const frontmatter: Record<string, string> = {};
-  for (const line of frontmatterMatch[1].split("\n")) {
-    const colonIdx = line.indexOf(":");
-    if (colonIdx === -1) continue;
-    const key = line.slice(0, colonIdx).trim();
-    let value = line.slice(colonIdx + 1).trim();
-    // Remove quotes
-    if (value.startsWith('"') && value.endsWith('"')) {
-      value = value.slice(1, -1);
-    } else if (value.startsWith("'") && value.endsWith("'")) {
-      value = value.slice(1, -1);
-    }
-    frontmatter[key] = value;
+  if (Object.keys(frontmatter).length === 0) {
+    // No frontmatter found
+    return null;
   }
   
-  const name = frontmatter.name || path.basename(filePath, ".md");
-  const description = frontmatter.description || "";
+  const name = (frontmatter.name as string) || path.basename(filePath, ".md");
+  const description = (frontmatter.description as string) || "";
   const systemPromptMode = (frontmatter.systemPromptMode as "append" | "replace") || "replace";
-  
-  // Get the system prompt content (everything after frontmatter)
-  const systemPrompt = content.slice(frontmatterMatch[0].length).trim();
+  const inheritProjectContext = (frontmatter.inheritProjectContext as boolean) ?? true;
+  const inheritSkills = (frontmatter.inheritSkills as boolean) ?? false;
   
   return {
     name,
     description,
-    systemPrompt,
+    systemPrompt: body,
     systemPromptMode,
+    inheritProjectContext,
+    inheritSkills,
     filePath,
   };
 }
@@ -115,7 +194,7 @@ function formatAgentList(agents: AgentInfo[]): string {
   lines.push("");
   
   for (const agent of agents) {
-    const desc = agent.description.split("\n")[0].slice(0, 60);
+    const desc = (agent.description || "No description").split("\n")[0].slice(0, 60);
     lines.push(`  ${agent.name.padEnd(25)} - ${desc}`);
   }
   
@@ -133,10 +212,8 @@ export default function (pi: ExtensionAPI) {
     if (!activeAgent) return;
     
     if (activeAgent.systemPromptMode === "replace") {
-      // Replace the system prompt entirely with the agent's prompt
       event.systemPrompt = activeAgent.systemPrompt;
     } else {
-      // Append the agent's prompt to the existing system prompt
       event.systemPrompt = `${event.systemPrompt}\n\n---\n\n${activeAgent.systemPrompt}`;
     }
   });
@@ -155,8 +232,13 @@ export default function (pi: ExtensionAPI) {
       const agents = discoverAgents(ctx.cwd);
       
       if (!args || !args.trim()) {
-        // No args - show interactive selector
         const names = agents.map(a => a.name);
+        
+        if (names.length === 0) {
+          ctx.ui.notify("No agents found. Check ~/.pi/agent/agents/", "error");
+          return;
+        }
+        
         const selected = await ctx.ui.select("Select agent:", names);
         
         if (!selected) {
@@ -175,12 +257,11 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       
-      // Args provided - try to find agent by name
       const agentName = args.trim();
       const agent = agents.find(a => a.name.toLowerCase() === agentName.toLowerCase());
       
       if (!agent) {
-        ctx.ui.notify(`Agent '${agentName}' not found. Use /agents to see available agents.`, "error");
+        ctx.ui.notify(`Agent '${agentName}' not found. Use /agents-list for available agents.`, "error");
         return;
       }
       
@@ -212,14 +293,20 @@ export default function (pi: ExtensionAPI) {
     },
   });
   
-  // Register shortcut Ctrl+Alt+A for agent switching (Ctrl+Shift+A conflicts with pi-subagents)
+  // Register shortcut Ctrl+Alt+A for agent switching
   pi.registerShortcut("ctrl+alt+a", {
     handler: async (ctx) => {
       currentCtx = ctx;
       
       const agents = discoverAgents(ctx.cwd);
       const names = agents.map(a => a.name);
-      const selected = await ctx.ui.select("Select agent (Ctrl+Shift+A):", names);
+      
+      if (names.length === 0) {
+        ctx.ui.notify("No agents found.", "error");
+        return;
+      }
+      
+      const selected = await ctx.ui.select("Select agent:", names);
       
       if (!selected) return;
       
