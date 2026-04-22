@@ -62,11 +62,15 @@ export default function (pi: ExtensionAPI) {
 		let selectedIndex = 0;
 
 		const rebuildItems = (): SelectItem[] =>
-			filtered.map((a) => ({
-				value: a.name,
-				label: a.name,
-				description: `${a.source === "project" ? "📁" : "🏠"} ${a.description}`,
-			}));
+			filtered.map((a) => {
+				const isActive = a.name === activeAgentName;
+				const activeBadge = isActive ? " ✓" : "";
+				return {
+					value: a.name,
+					label: a.name + activeBadge,
+					description: `${a.source === "project" ? "📁" : "🏠"} ${a.description}${isActive ? " ◀ active" : ""}`,
+				};
+			});
 
 		await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 			const container = new Container();
@@ -74,9 +78,10 @@ export default function (pi: ExtensionAPI) {
 			// Top border
 			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
-			// Title
+			// Title with active agent
+			const activeDisplay = activeAgentName ? ` → ${activeAgentName}` : "";
 			container.addChild(
-				new Text(theme.fg("accent", theme.bold("  Switch Agent  ")), 1, 0),
+				new Text(theme.fg("accent", theme.bold(`  Switch Agent${activeDisplay}  `)), 1, 0),
 			);
 
 			// Search input
