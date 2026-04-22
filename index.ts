@@ -82,11 +82,17 @@ export default function (pi: ExtensionAPI) {
 			// Search input
 			const searchInput = new Input();
 			searchInput.placeholder = "Search agents...";
-			searchInput.onChange = () => {
-				searchQuery = searchInput.value;
-				filtered = filterAgents(allAgents, searchQuery);
-				selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1));
-				tui.requestRender();
+			const originalHandleInput = searchInput.handleInput.bind(searchInput);
+			searchInput.handleInput = (data: string) => {
+				const result = originalHandleInput(data);
+				// Trigger filter on any character change (not on submit/escape)
+				if (data !== "enter" && data !== "escape") {
+					searchQuery = searchInput.value;
+					filtered = filterAgents(allAgents, searchQuery);
+					selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1));
+					tui.requestRender();
+				}
+				return result;
 			};
 			container.addChild(searchInput);
 
@@ -102,9 +108,14 @@ export default function (pi: ExtensionAPI) {
 				noMatch: (t) => theme.fg("warning", t),
 			});
 
-			// Keep selectList index in sync
-			selectList.onFocusChange = (idx) => {
-				selectedIndex = idx;
+			// Select agent via onSelect callback (Enter key triggers this via SelectList)
+			selectList.onSelect = (item) => {
+				const name = item.value as string;
+				if (name) {
+					done(undefined);
+					// Activate after picker closes
+					activate(pi, ctx, name);
+				}
 			};
 
 			container.addChild(selectList);
@@ -151,18 +162,6 @@ export default function (pi: ExtensionAPI) {
 						selectedIndex = Math.min(filtered.length - 1, selectedIndex + 1);
 						selectList.selectedIndex = selectedIndex;
 						tui.requestRender();
-						return;
-					}
-					// Enter → select current
-					if (data === "enter") {
-						if (filtered.length > 0) {
-							const name = filtered[selectedIndex]?.name;
-							if (name) {
-								done(undefined);
-								// Activate after close
-								activate(pi, ctx, name);
-							}
-						}
 						return;
 					}
 					// Escape → cancel

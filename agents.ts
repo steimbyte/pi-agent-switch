@@ -72,17 +72,19 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 
 		if (!frontmatter.name || !frontmatter.description) continue;
 
-		// Handle tools as comma-separated string (simple YAML scalar)
-		let tools: string[] | undefined;
-		if (frontmatter.tools) {
-			if (frontmatter.tools.includes(",")) {
-				tools = frontmatter.tools.split(",").map((t) => t.trim()).filter(Boolean);
-			} else {
-				// Single tool name
-				tools = [frontmatter.tools.trim()];
+		// Handle tools as comma-separated string or YAML array
+			let tools: string[] | undefined;
+			if (frontmatter.tools) {
+				const toolsValue = frontmatter.tools;
+				// Normalize to string if it is an array (YAML parsed as sequence)
+				const toolsStr = Array.isArray(toolsValue) ? toolsValue.join(",") : String(toolsValue);
+				if (toolsStr.includes(",")) {
+					tools = toolsStr.split(",").map((t) => t.trim()).filter(Boolean);
+				} else {
+					// Single tool name
+					tools = [toolsStr.trim()];
+				}
 			}
-		}
-
 		agents.push({
 			name: frontmatter.name,
 			description: frontmatter.description,
