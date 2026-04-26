@@ -10,6 +10,7 @@
  * - name, description, tools, model (optional), systemPrompt
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, Input, matchesKey, Key } from "@mariozechner/pi-tui";
@@ -17,7 +18,7 @@ import { DynamicBorder, getAgentDir } from "@mariozechner/pi-coding-agent";
 import { discoverAgents, findAgent } from "./agents";
 
 const MAX_AGENTS_SHOWN = 15;
-const DEFAULT_CONFIG_PATH = "agent-switcher-default.json";
+const DEFAULT_CONFIG_FILE = "agent-switcher-default.json";
 
 // Module-level state — survives across commands in the same session
 let defaultAgentName: string | null = null;
@@ -25,31 +26,29 @@ let activeAgentName: string | null = null;
 let activeAgentConfig: ReturnType<typeof findAgent> | null = null;
 
 export default function (pi: ExtensionAPI) {
-	// ── Helper: save/load default agent config ───────────────────────────
+	// ── Helper: load/save default agent ──────────────────────────────────────
 
-	function getConfigPath(): string {
-		return path.join(getAgentDir(), DEFAULT_CONFIG_PATH);
+	function getDefaultConfigPath(): string {
+		return path.join(getAgentDir(), DEFAULT_CONFIG_FILE);
 	}
 
 	function saveDefaultAgent(name: string): void {
 		try {
-			const fs = require("node:fs");
-			const configPath = getConfigPath();
+			const configPath = getDefaultConfigPath();
 			fs.writeFileSync(configPath, JSON.stringify({ defaultAgent: name }, null, 2));
-		} catch (e) {
-			// Ignore errors - non-critical feature
+		} catch {
+			// Ignore errors - non-critical
 		}
 	}
 
 	function loadDefaultAgent(): string | null {
 		try {
-			const fs = require("node:fs");
-			const configPath = getConfigPath();
+			const configPath = getDefaultConfigPath();
 			if (fs.existsSync(configPath)) {
 				const data = JSON.parse(fs.readFileSync(configPath, "utf-8"));
 				return data.defaultAgent || null;
 			}
-		} catch (e) {
+		} catch {
 			// Ignore errors
 		}
 		return null;
@@ -227,11 +226,10 @@ export default function (pi: ExtensionAPI) {
 			// Find the agent
 			const agent = findAgent(ctx.cwd, agentName);
 			if (!agent) {
-				// Check if "default" was the agent name (no agent specified)
+				// Check if "default" was the agent name
 				if (agentName.toLowerCase() === "default") {
-					// Show current default or clear it
 					if (defaultAgentName) {
-						ctx.ui.notify(`Current default agent: ${defaultAgentName}`, "info");
+						ctx.ui.notify(`Current default: ${defaultAgentName}`, "info");
 					} else {
 						ctx.ui.notify("No default agent set.", "info");
 					}
@@ -251,7 +249,7 @@ export default function (pi: ExtensionAPI) {
 			if (isDefault) {
 				defaultAgentName = agentName;
 				saveDefaultAgent(agentName);
-				ctx.ui.notify(`Set default agent to: ${agentName}`, "info");
+				ctx.ui.notify(`Default agent set to: ${agentName}`, "info");
 			}
 
 			await activate(pi, ctx, agentName);
@@ -292,7 +290,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		let activated = false;
 
-		// First, check session for saved active agent
+		// First check session for saved active agent
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type === "custom" && (entry as any).customType === "agent-switcher:active") {
 				const name = (entry as any).data?.name as string | undefined;
@@ -313,8 +311,9 @@ export default function (pi: ExtensionAPI) {
 				}
 				break;
 			}
+		}
 
-		// If no saved agent, check for default agent
+		// If no session agent, check for default
 		if (!activated) {
 			const defaultName = loadDefaultAgent();
 			if (defaultName) {
