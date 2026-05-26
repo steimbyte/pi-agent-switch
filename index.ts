@@ -25,6 +25,21 @@ let activeAgent: AgentInfo | null = null;
 let currentCtx: ExtensionContext | undefined;
 
 /**
+ * Load default agent from ~/.pi/agent-switcher-default.json
+ */
+function loadDefaultAgentName(): string | null {
+  try {
+    const defaultPath = path.join(os.homedir(), ".pi", "agent", "agent-switcher-default.json");
+    if (!fs.existsSync(defaultPath)) return null;
+    const content = fs.readFileSync(defaultPath, "utf-8");
+    const parsed = JSON.parse(content);
+    return parsed.defaultAgent || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse YAML frontmatter handling multiline strings (>-, |-, >, |)
  */
 function parseFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
@@ -221,9 +236,22 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Session start - update status bar to show active agent
+  // Session start - activate default agent if none active yet
   pi.on("session_start", async (event, ctx) => {
     currentCtx = ctx;
+
+    // Auto-activate default agent if not already set
+    if (!activeAgent) {
+      const defaultName = loadDefaultAgentName();
+      if (defaultName) {
+        const agents = discoverAgents(ctx.cwd);
+        const defaultAgent = agents.find(a => a.name.toLowerCase() === defaultName.toLowerCase());
+        if (defaultAgent) {
+          activeAgent = defaultAgent;
+        }
+      }
+    }
+
     if (activeAgent && ctx.hasUI) {
       ctx.ui.setStatus("agent", activeAgent.name);
     }
